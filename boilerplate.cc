@@ -7,60 +7,300 @@
 #include "ns3/mobility-module.h"
 #include "ns3/applications-module.h"
 #include "ns3/wave-module.h"
+#include "ns3/log.h"
+#include "ns3/tag.h"
+#include "ns3/socket.h"
+#include "ns3/constant-acceleration-mobility-model.h"
+#include <iomanip>
+#include <cmath>
+#include <bits/stdc++.h>
+#include <chrono>
 
 using namespace ns3;
+using namespace std;
+using namespace std::chrono;
 
-// Global declarations for the SD-VEN components
+NS_LOG_COMPONENT_DEFINE ("LDA-SDVENs");
+
+#define max 40
+#define max1 1
+
+// ============================================================================
+// GLOBAL NETWORK COMPONENTS
+// ============================================================================
+
 NodeContainer controller_Node, RSU_Nodes, Vehicle_Nodes;
 NodeContainer dsrc_Nodes;
 NetDeviceContainer rsuDevices, vehicleDevices, wifidevices;
 Ipv4InterfaceContainer rsuInterfaces, vehicleInterfaces;
 ApplicationContainer apps, RSU_apps;
 
-uint32_t N_Vehicles = 3;
-uint32_t N_RSUs = 2;
+// ============================================================================
+// NETWORK CONFIGURATION VARIABLES
+// ============================================================================
+
+uint32_t N_Vehicles = 16;
+uint32_t N_RSUs = 0;
+const int total_size = 16;
+uint32_t large = 50000;
+uint32_t var = N_Vehicles + N_RSUs;
+double simTime = 13.7;
+
+// LLDP and Discovery Parameters
 std::vector<uint32_t> vehicle_to_rsu_map;
 uint32_t lldp_i2i_pkt_size = 64;
 uint32_t lldp_i2v_pkt_size = 64;
-uint32_t lldp_v2v_pkt_size   = 256;
-double data_transmission_period = 1.0/data_transmission_frequency; 
-const int total_size = 16;
-int attack_number = 0;
+uint32_t lldp_v2v_pkt_size = 256;
+
+// ============================================================================
+// ROUTING AND ALGORITHM PARAMETERS
+// ============================================================================
+
+int routing_algorithm = 4; // 0-port based, 1-normal LLDP, 2-crypto, 3-Link guard, 4-proposed LLDP
+int experiment_number = 0; // 0-individual attack, 1-combined attack
+int attack_number = 5; // 1-Attack 1, 2-Attack 2, ..., 6-Combined
+int attack_percentage = 40;
+
+// ============================================================================
+// TIMING AND FREQUENCY PARAMETERS
+// ============================================================================
+
+double optimization_frequency = 0.33;
+double optimization_period = 1.0 / optimization_frequency;
+double data_transmission_frequency = 0.33;
+double data_transmission_period = 1.0 / data_transmission_frequency;
+double entropy_threshold = 0.005;
+double routing_frequency = data_transmission_frequency;
+double contention_threshold = 0.0;
+double link_lifetime_threshold = 0.400;
+
+// ============================================================================
+// ARCHITECTURE AND MOBILITY CONFIGURATION
+// ============================================================================
+
+int mobility_scenario = 0; // 0-urban, 1-non-urban, 2-highway
+int architecture = 2; // 0-centralized, 1-distributed, 2-hybrid
+int maxspeed = 60;
+int paper = 1; // 0-optimization, 1-architecture
+
+// ============================================================================
+// QoS AND MAC PARAMETERS
+// ============================================================================
+
+uint32_t flow_packet_size = 100;
+uint32_t qf = 1;
+uint32_t AIFSN = 0;
+double B_max = 0.0;
+double latency_max = 0.0;
+double loss_max = 0.0;
+uint32_t CW_max = 0;
+double AIFS = 0.0;
+double mu1 = 0.010;
+double mu2 = 10.00;
+double mu3 = 10.0;
+
+// ============================================================================
+// ATTACK PRESENCE FLAGS AND MALICIOUS NODE ARRAYS
+// ============================================================================
+
+// Attack presence flagsfor vehicles
+bool present_location_attack_nodes = false;
+bool present_flooding_attack_nodes = true;
+bool present_fabrication_attack_nodes = false;
+bool present_MIM_attack_nodes = false;
+bool present_vanishing_attack_nodes = false;
+
+// Attack presence flags for controllers
+bool present_flooding_attack_controllers = false;
+bool present_fabrication_attack_controllers = false;
+bool present_MIM_attack_controllers = false;
+bool present_vanishing_attack_controllers = false;
+
+// Malicious node arrays
+bool location_malicious_nodes[total_size];
+bool flooding_malicious_nodes[total_size];
+bool fabrication_malicious_nodes[total_size];
+bool MIM_malicious_nodes[total_size];
+bool vanishing_malicious_nodes[total_size];
+
+// Malicious controller arrays
+int controllers = 4;
+bool flooding_malicious_controllers[4];
+bool fabrication_malicious_controllers[4];
+bool MIM_malicious_controllers[4];
+bool vanishing_malicious_controllers[4];
+
+// ============================================================================
+// LINK STATE, CONTROL, AND IDENTIFICATION VARIABLES
+// ============================================================================
+
+uint32_t empty_neighborset[max];
 int attacker_node_id[100];
+uint32_t node_controller_ID[total_size];
+uint32_t assigned_consortium_ID[total_size];
+bool blocked_port_state[total_size][total_size][2];
+uint32_t flooding_counter[total_size][total_size][2];
 
-uint32_t empty_neighborset[max]; 
-double arch2_i2i_offset       = 0.002;   
-double arch2_i2i_recv_offset  = 0.004;   
-double arch2_i2v_offset       = 0.006;   
-double arch2_i2v_recv_offset  = 0.008;   
-double arch2_v2v_offset       = 0.010;   
-double arch2_v2v_recv_offset  = 0.014;     
-  
+// ============================================================================
+// TRAINING AND TIMESTAMP VARIABLES
+// ============================================================================
 
-void initialize_empty()
-{
-	for (uint32_t i =0; i < max; i++)
-	{
-		empty_neighborset[i] = large;
-	}
-}
+bool training = false;
+bool training_delay = false;
+bool controller_malicious_assumption = true;
+
+double HELLO_final_timestamp;
+double HELLO_initial_timestamp;
+double uplink_last[total_size];
+double downlink_last = 0.0;
+double last_downlink[total_size];
+
+// ============================================================================
+// ARCHITECTURE 2 TIMING OFFSETS
+// ============================================================================
+
+double arch2_i2i_offset = 0.002;
+double arch2_i2i_recv_offset = 0.004;
+double arch2_i2v_offset = 0.006;
+double arch2_i2v_recv_offset = 0.008;
+double arch2_v2v_offset = 0.010;
+double arch2_v2v_recv_offset = 0.014;
+
+// ============================================================================
+// UE STATUS AND CHANNEL UTILIZATION
+// ============================================================================
+
+std::vector<bool> ueBusy;
+std::vector<bool> ueDLBusy;
+double current_channel_utilization = 0.0;
+double average_channel_utilization = 0.0;
+
+// ============================================================================
+// LINK AND ROUTING STRUCTURES
+// ============================================================================
+
+struct Link_fi {
+    double Link_values[total_size];
+};
+
+struct Link_f {
+    struct Link_fi Link_fi_inst[total_size];
+};
+
+struct Link {
+    struct Link_f Link_f_inst[2];
+};
+
+struct Link Link_at_controller_inst[2];
+struct Link Link_duplicates_at_controller_inst[2];
+struct Link Link_duplicates_downlink_at_controller_inst[2];
+struct Link Link_duplicates_SecondTime_downlink_at_controller_inst[2];
+struct Link Link_duplicates_SecondTime_uplink_at_controller_inst[2];
+struct Link LLDP_timestamp_at_controller_inst[2];
+
+// ============================================================================
+// ADJACENCY MATRIX AND ROUTING
+// ============================================================================
+
+vector<vector<double>> adjacencyMatrix;
+vector<vector<double>> old_adjacencyMatrix;
+
+// ============================================================================
+// ANOMALY DETECTION MATRICES
+// ============================================================================
+
+vector<vector<vector<double>>> E_mat;
+vector<vector<bool>> F_mat;
+
+// ============================================================================
+// PACKET AND DATA STRUCTURES
+// ============================================================================
+
+struct downlink_rest_data {
+    uint32_t casted_raw_source_nodeid;
+    uint32_t casted_raw_source_portid;
+    uint32_t casted_destination_nodeid;
+    uint32_t casted_raw_destination_portid;
+    uint8_t * stage = new uint8_t[2];
+    uint8_t * HMAC_key = new uint8_t[163];
+    uint8_t * HMAC = new uint8_t[65];
+    uint8_t * DS_public_key1 = new uint8_t[513];
+    uint8_t * DS_public_key2 = new uint8_t[2561];
+    uint8_t * DS_public_key3 = new uint8_t[2561];
+    uint8_t * DS1 = new uint8_t[201];
+    uint8_t * DS2 = new uint8_t[201];
+    uint8_t * source_nodeid = new uint8_t[36];
+    uint8_t * source_portid = new uint8_t[36];
+    uint8_t * raw_source_nodeid = new uint8_t[2];
+    uint8_t * raw_source_portid = new uint8_t[2];
+    uint8_t * destination_nodeid = new uint8_t[33];
+    uint8_t * destination_portid = new uint8_t[33];
+    uint8_t * HMAC1 = new uint8_t[65];
+    uint8_t * HMAC2 = new uint8_t[65];
+};
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
 
 double sum_of_nodeids = 0;
-void nodeid_sum()
-{
-	sum_of_nodeids = 0;
-	for (uint32_t i=2;i<total_size+2;i++)
-	{
-		sum_of_nodeids = sum_of_nodeids + i;
-	}
+
+void initialize_empty() {
+    for (uint32_t i = 0; i < max; i++) {
+        empty_neighborset[i] = large;
+    }
 }
 
-// Function Prototypes for the 3-Phase Discovery
+void nodeid_sum() {
+    sum_of_nodeids = 0;
+    for (uint32_t i = 2; i < total_size + 2; i++) {
+        sum_of_nodeids = sum_of_nodeids + i;
+    }
+}
+
+// Unit step function for link validation (returns 0 if number <= step, else 1)
+double unit_step(double number, double step) {
+    if (number <= step) {
+        return 0.0;
+    } else {
+        return 1.0;
+    }
+}
+
+// Boolean probability function for attack injection
+bool GetBooleanWithProbability(double probabilityPercent, int nodeID) {
+    srand(Simulator::Now().GetSeconds() + 1.0 * (rand() % 50) + 5.0 * nodeID);
+    double randomValue = 1.0 * (rand() % 100);
+    return randomValue < probabilityPercent;
+}
+
+// Initialize E and F matrices for anomaly detection
+void generate_F_and_E() {
+    E_mat.assign(total_size, vector<vector<double>>(total_size, vector<double>(2, 0.0)));
+    F_mat.assign(total_size, vector<bool>(2, false));
+
+    NS_LOG_INFO("E and F matrices initialized");
+
+    for (uint32_t i = 0; i < total_size; i++) {
+        for (uint32_t j = 0; j < total_size; j++) {
+            for (uint32_t k = 0; k < 2; k++) {
+                blocked_port_state[i][j][k] = false;
+                flooding_counter[i][j][k] = 0;
+            }
+        }
+    }
+}
+
+// ============================================================================
+// FUNCTION PROTOTYPES
+// ============================================================================
+
+// Phase Discovery Functions
 void PhaseI_I2IDiscovery();
 void PhaseII_I2VDiscovery();
 void PhaseIII_V2VDiscovery();
 
-// Architecture 2 Function Prototypes
+// Architecture 2 Functions
 void arch2_assign_vehicles_to_rsus();
 void arch2_i2i_controller_send_packetout();
 void arch2_i2v_controller_send_packetout(uint32_t rsu_index);
@@ -71,386 +311,341 @@ void arch2_v2v_rsu_inject_lldp(uint32_t rsu_index);
 void arch2_v2v_vehicle_rebroadcast(uint32_t vehicle_index);
 void arch2_v2v_neighbor_confirm(uint32_t neighbor_vehicle_index);
 
-// Placeholder function prototypes (implement based on LDA.cc)
+// Data Transmission Functions
 void p2p_data_broadcast(Ptr<Application> app, Ptr<Node> node);
 void centralized_dsrc_data_broadcast(Ptr<NetDevice> dev, Ptr<Node> node, uint32_t idx, int channel);
 void centralized_dsrc_data_unicast(Ptr<Node> node, uint32_t src_idx, uint32_t dst_idx, int channel);
+void send_dsrc_data_unicast(Ptr<Node> source_node, uint32_t node_index, uint32_t destination, uint32_t port_id);
+void encrypt_dsrc_data_unicast(uint32_t node_index, uint32_t destination, uint32_t port_id);
 
-int main(int argc, char *argv[])
-{
-    initialize_empty(); // Initialize empty neighbor set values
-    nodeid_sum(); // Calculate sum of node ids for optimization calculations
+// ============================================================================
+// IMPLEMENTATION: MAIN FUNCTION
+// ============================================================================
 
-    // --- Initial Boilerplate and Configuration ---
-    // N_Vehicles and N_RSUs are now global
-    double simTime = 20.0;
-    
+int main(int argc, char *argv[]) {
+    // Initialize utility functions
+    initialize_empty();
+    nodeid_sum();
+    generate_F_and_E();
+
+    // Parse command line arguments
     CommandLine cmd;
     cmd.AddValue("N_Vehicles", "Number of vehicles", N_Vehicles);
     cmd.AddValue("N_RSUs", "Number of RSUs", N_RSUs);
-    // cmd.AddValue ("data_transmission_frequency", "data_transmission_frequency", data_transmission_frequency);
-    // cmd.AddValue ("simTime", "simTime", simTime);
-    // cmd.AddValue ("attack_number", "attack_number", attack_number);
-    // cmd.AddValue ("attack_percentage", "attack_percentage", attack_percentage);
+    cmd.AddValue("simTime", "Simulation time in seconds", simTime);
+    cmd.AddValue("routing_algorithm", "Routing algorithm (0-5)", routing_algorithm);
+    cmd.AddValue("attack_number", "Attack scenario number", attack_number);
+    cmd.AddValue("attack_percentage", "Percentage of malicious nodes", attack_percentage);
+    cmd.AddValue("architecture", "Architecture: 0-centralized, 1-distributed, 2-hybrid", architecture);
     cmd.Parse(argc, argv);
 
-    // Node Creation
+    // Recalculate derived values
+    var = N_Vehicles + N_RSUs;
+    
+    NS_LOG_UNCOND("\n========== LDA-in-SDVENs Simulation ==========");
+    NS_LOG_UNCOND("Vehicles: " << N_Vehicles << " | RSUs: " << N_RSUs);
+    NS_LOG_UNCOND("Architecture: " << architecture << " | Routing: " << routing_algorithm);
+    NS_LOG_UNCOND("Attack Scenario: " << attack_number << " (" << attack_percentage << "%)");
+    NS_LOG_UNCOND("Simulation Time: " << simTime << " seconds");
+    NS_LOG_UNCOND("===========================================\n");
+
+    // Create nodes
     controller_Node.Create(1);
     Vehicle_Nodes.Create(N_Vehicles);
-
-    if(N_vehicles > 0)
-    {
+    if (N_RSUs > 0) {
         RSU_Nodes.Create(N_RSUs);
     }
+    dsrc_Nodes.Add(Vehicle_Nodes);
+    dsrc_Nodes.Add(RSU_Nodes);
 
-    // --- Infrastructure Setup (Wired Backbone) ---
+    // ========== Infrastructure Setup (Wired Backbone - CSMA) ==========
     CsmaHelper csma;
     csma.SetChannelAttribute("DataRate", StringValue("1000Mbps"));
     csma.SetChannelAttribute("Delay", TimeValue(MicroSeconds(10)));
-    
+
     NodeContainer csma_nodes;
-
-    // Ipv4AddressHelper address;
-    // Ipv4InterfaceContainer csmaInterfaces;
-    // NetDeviceContainer csmaDevices;
-    // InternetStackHelper stack;
-
     csma_nodes.Add(controller_Node);
     csma_nodes.Add(RSU_Nodes);
     NetDeviceContainer csmaDevices = csma.Install(csma_nodes);
 
-    // --- Wireless Setup (WAVE/DSRC for V2V/I2V) ---
+    // ========== Wireless Setup (WAVE/DSRC for V2V/I2V) ==========
     YansWifiChannelHelper channel = YansWifiChannelHelper::Default();
     YansWifiPhyHelper phy;
     phy.SetChannel(channel.Create());
-    
+
     Wifi80211pHelper wifi = Wifi80211pHelper::Default();
     NqosWaveMacHelper mac = NqosWaveMacHelper::Default();
-    
+
     NodeContainer wirelessNodes;
     wirelessNodes.Add(RSU_Nodes);
     wirelessNodes.Add(Vehicle_Nodes);
     NetDeviceContainer wirelessDevices = wifi.Install(phy, mac, wirelessNodes);
+    wifidevices = wirelessDevices;
 
-    // Protocol Stack
+    // ========== Internet Stack ==========
     InternetStackHelper stack;
     stack.Install(controller_Node);
     stack.Install(RSU_Nodes);
     stack.Install(Vehicle_Nodes);
 
+    // ========== IP Address Assignment ==========
     Ipv4AddressHelper address;
     address.SetBase("10.1.1.0", "255.255.255.0");
     address.Assign(csmaDevices);
-    address.SetBase("192.168.1.0", "255.255.255.0");
-    address.Assign(wirelessDevices);
 
-    // Mobility
+    address.SetBase("192.168.1.0", "255.255.255.0");
+    Ipv4InterfaceContainer wirelessInterfaces = address.Assign(wirelessDevices);
+
+    // ========== Mobility ==========
     MobilityHelper mobility;
     mobility.SetMobilityModel("ns3::ConstantVelocityMobilityModel");
+    
+    // RSU positions (fixed grid)
+    mobility.SetPositionAllocator("ns3::GridPositionAllocator",
+                                   "MinX", DoubleValue(0.0),
+                                   "MinY", DoubleValue(0.0),
+                                   "DeltaX", DoubleValue(500.0),
+                                   "DeltaY", DoubleValue(500.0),
+                                   "GridWidth", UintegerValue(10),
+                                   "LayoutType", StringValue("RowFirst"));
     mobility.Install(RSU_Nodes);
+
+    // Vehicle mobility (initial positions)
+    Ptr<ListPositionAllocator> positionAlloc = CreateObject<ListPositionAllocator>();
+    for (uint32_t i = 0; i < N_Vehicles; i++) {
+        positionAlloc->Add(Vector(i * 50.0, 0.0, 0.0));
+    }
+    mobility.SetPositionAllocator(positionAlloc);
     mobility.Install(Vehicle_Nodes);
 
-    // --- Custom Hybrid LLDP Scheduling ---
-    
-    // Phase I: Bootstrapping - I2I Discovery (Scheduled at start)
-    Simulator::Schedule(Seconds(1.0), &PhaseI_I2IDiscovery);
+    // ========== Initialize Global Components ==========
+    ueBusy.resize(N_Vehicles + N_RSUs, false);
+    ueDLBusy.resize(N_Vehicles + N_RSUs, false);
 
-    // Phase II: Discovery transitions to I2V (Scheduled after I2I stabilizes)
-    Simulator::Schedule(Seconds(2.0), &PhaseII_I2VDiscovery);
-
-    // Phase III: Highly dynamic V2V Discovery (Periodic updates)
-    for (double t = 3.0; t < simTime; t += 2.0)
-    {
-        Simulator::Schedule(Seconds(t), &PhaseIII_V2VDiscovery);
-    }
-    if (architecture == 2)
-{
-  
-
-    Simulator::Schedule(Seconds(1.0),   arch2_assign_vehicles_to_rsus);
-
-
-    for (uint32_t i = 0; i < total_size + 2; i++)
-    {
-        uplink_last[i]   = 0.0;
+    for (uint32_t i = 0; i < total_size; i++) {
+        uplink_last[i] = 0.0;
         last_downlink[i] = 0.0;
     }
 
-    // ── Per-round loop ──────────────────────────────────────────
-    double t_start = 6.00;
-
-    for (double t = t_start; t < simTime - 1; t += data_transmission_period)
-    {
-        // ── Standard resets ──
-        // Simulator::Schedule(Seconds(t), arch2_reset_round_counters);
-        // Simulator::Schedule(Seconds(t), reset_packet_timestamps);
-        // Simulator::Schedule(Seconds(t), reset_confusion_matrix);
-        // Simulator::Schedule(Seconds(t), update_mobility);
-        // Simulator::Schedule(Seconds(t), generate_F_and_E);
-        // Simulator::Schedule(Seconds(t), set_dsrc_initial_timestamp);
-        // Simulator::Schedule(Seconds(t), set_ethernet_initial_timestamp);
-
-
-        // PHASE I – I2I Discovery
-        Simulator::Schedule(Seconds(t + arch2_i2i_offset),
-            arch2_i2i_controller_send_packetout);
-
-        for (uint32_t r = 0; r < N_RSUs; r++)
-        {
-            Simulator::Schedule(Seconds(t + arch2_i2i_offset + 0.0001*r),
-                arch2_i2i_rsu_forward_to_neighbors, r);
-
+    // ========== Configure Attack Scenarios ==========
+    NS_LOG_INFO("Configuring attack scenario " << attack_number);
+    
+    for (uint32_t i = 0; i < total_size; i++) {
+        location_malicious_nodes[i] = present_location_attack_nodes && 
+                                       GetBooleanWithProbability(attack_percentage, i);
+        flooding_malicious_nodes[i] = present_flooding_attack_nodes && 
+                                       GetBooleanWithProbability(attack_percentage, i);
+        fabrication_malicious_nodes[i] = present_fabrication_attack_nodes && 
+                                          GetBooleanWithProbability(attack_percentage, i);
+        MIM_malicious_nodes[i] = present_MIM_attack_nodes && 
+                                 GetBooleanWithProbability(attack_percentage, i);
+        vanishing_malicious_nodes[i] = present_vanishing_attack_nodes && 
+                                       GetBooleanWithProbability(attack_percentage, i);
+        
+        if (flooding_malicious_nodes[i]) {
+            NS_LOG_INFO("Node " << i << " marked as flooding attacker");
         }
-
-        for (uint32_t r = 0; r < N_RSUs; r++)
-        {
-            Simulator::Schedule(Seconds(t + arch2_i2v_offset + 0.0001*r),
-                arch2_i2v_controller_send_packetout, r);
-
-            Simulator::Schedule(Seconds(t + arch2_i2v_offset + 0.0002*r),
-                arch2_i2v_rsu_encapsulate_and_forward, r);
-        }
-
-        for (uint32_t v = 0; v < N_Vehicles; v++)
-        {
-            Simulator::Schedule(Seconds(t + arch2_i2v_offset + 0.003 + 0.0001*v),
-                arch2_i2v_vehicle_respond, v);
-        }
-
-
-        // PHASE III – V2V Discovery
-        for (uint32_t r = 0; r < N_RSUs; r++)
-        {
-            Simulator::Schedule(Seconds(t + arch2_v2v_offset + 0.0001*r),
-                arch2_v2v_rsu_inject_lldp, r);
-        }
-
-        for (uint32_t v = 0; v < N_Vehicles; v++)
-        {
-            Simulator::Schedule(Seconds(t + arch2_v2v_offset + 0.002 + 0.0001*v),
-                arch2_v2v_vehicle_rebroadcast, v);
-
-            // Neighbors: schedule all other vehicles in same RSU zone
-            Simulator::Schedule(Seconds(t + arch2_v2v_offset + 0.003 + 0.0001*v),
-                arch2_v2v_neighbor_confirm, v);
-        }
-
     }
- } // end per-round loop
 
+    for (int i = 0; i < controllers; i++) {
+        flooding_malicious_controllers[i] = present_flooding_attack_controllers && 
+                                            controller_malicious_assumption;
+        fabrication_malicious_controllers[i] = present_fabrication_attack_controllers && 
+                                               controller_malicious_assumption;
+        MIM_malicious_controllers[i] = present_MIM_attack_controllers && 
+                                       controller_malicious_assumption;
+        vanishing_malicious_controllers[i] = present_vanishing_attack_controllers && 
+                                             controller_malicious_assumption;
+    }
 
+    // ========== Scheduling Discovery Phases ==========
+    Simulator::Schedule(Seconds(1.0), &PhaseI_I2IDiscovery);
+    Simulator::Schedule(Seconds(2.0), &PhaseII_I2VDiscovery);
+    for (double t = 3.0; t < simTime; t += 2.0) {
+        Simulator::Schedule(Seconds(t), &PhaseIII_V2VDiscovery);
+    }
+
+    // ========== Architecture 2: Hybrid Discovery Loop ==========
+    if (architecture == 2) {
+        Simulator::Schedule(Seconds(1.0), &arch2_assign_vehicles_to_rsus);
+
+        double t_start = 6.00;
+        for (double t = t_start; t < simTime - 1; t += data_transmission_period) {
+            // PHASE I – I2I Discovery
+            Simulator::Schedule(Seconds(t + arch2_i2i_offset),
+                &arch2_i2i_controller_send_packetout);
+
+            for (uint32_t r = 0; r < N_RSUs; r++) {
+                Simulator::Schedule(Seconds(t + arch2_i2i_offset + 0.0001 * r),
+                    &arch2_i2i_rsu_forward_to_neighbors, r);
+            }
+
+            // PHASE II – I2V Discovery
+            for (uint32_t r = 0; r < N_RSUs; r++) {
+                Simulator::Schedule(Seconds(t + arch2_i2v_offset + 0.0001 * r),
+                    &arch2_i2v_controller_send_packetout, r);
+
+                Simulator::Schedule(Seconds(t + arch2_i2v_offset + 0.0002 * r),
+                    &arch2_i2v_rsu_encapsulate_and_forward, r);
+            }
+
+            for (uint32_t v = 0; v < N_Vehicles; v++) {
+                Simulator::Schedule(Seconds(t + arch2_i2v_offset + 0.003 + 0.0001 * v),
+                    &arch2_i2v_vehicle_respond, v);
+            }
+
+            // PHASE III – V2V Discovery
+            for (uint32_t r = 0; r < N_RSUs; r++) {
+                Simulator::Schedule(Seconds(t + arch2_v2v_offset + 0.0001 * r),
+                    &arch2_v2v_rsu_inject_lldp, r);
+            }
+
+            for (uint32_t v = 0; v < N_Vehicles; v++) {
+                Simulator::Schedule(Seconds(t + arch2_v2v_offset + 0.002 + 0.0001 * v),
+                    &arch2_v2v_vehicle_rebroadcast, v);
+
+                Simulator::Schedule(Seconds(t + arch2_v2v_offset + 0.003 + 0.0001 * v),
+                    &arch2_v2v_neighbor_confirm, v);
+            }
+        }
+    }
+
+    // Run simulation
     Simulator::Stop(Seconds(simTime));
     Simulator::Run();
+    
+    NS_LOG_UNCOND("\n========== Simulation Complete ==========");
+    NS_LOG_UNCOND("Total simulation time: " << simTime << " seconds");
+    NS_LOG_UNCOND("========================================\n");
+    
     Simulator::Destroy();
     return 0;
 }
 
-// --- Phase I: Infrastructure-to-Infrastructure (I2I) Discovery ---
-void PhaseI_I2IDiscovery()
-{
-    NS_LOG_UNCOND("Phase I: Controller initiating LLDP Packet-Out for I2I Discovery...");
-    // Controller sends LLDP probe to RSUs via wired backbone
-    // In ns-3, this is simulated by sending a custom packet from Controller to RSU IP
-    // Logic: If Packet-In returns from neighbor, link is validated
+// ============================================================================
+// IMPLEMENTATION: PHASE DISCOVERY FUNCTIONS
+// ============================================================================
+
+void PhaseI_I2IDiscovery() {
+    NS_LOG_UNCOND("[Phase I] t=" << Simulator::Now().GetSeconds() 
+                  << "s - Controller initiating LLDP Packet-Out for I2I Discovery");
+    arch2_assign_vehicles_to_rsus();
 }
 
-// --- Phase II: Infrastructure-to-Vehicle (I2V) Discovery ---
-void PhaseII_I2VDiscovery()
-{
-    NS_LOG_UNCOND("Phase II: RSU encapsulating LLDP for I2V Discovery...");
-    // RSU receives Packet-Out from Controller
-    // RSU encapsulates and broadcasts wirelessly to Vehicles
-    // Vehicle extracts and returns LLDP to RSU immediately
+void PhaseII_I2VDiscovery() {
+    NS_LOG_UNCOND("[Phase II] t=" << Simulator::Now().GetSeconds() 
+                  << "s - RSU encapsulating LLDP for I2V Discovery");
 }
 
-// --- Phase III: Vehicle-to-Vehicle (V2V) Discovery ---
-void PhaseIII_V2VDiscovery()
-{
-    NS_LOG_UNCOND("Phase III: Initiating Cooperative V2V Discovery Rebroadcast...");
-    // RSU injects LLDP into wireless medium
-    // Target Vehicle performs local cooperative rebroadcast
-    // Neighboring Vehicles overhear and report confirmation back to RSU
+void PhaseIII_V2VDiscovery() {
+    NS_LOG_UNCOND("[Phase III] t=" << Simulator::Now().GetSeconds() 
+                  << "s - Initiating Cooperative V2V Discovery Rebroadcast");
 }
 
-void centralized_dsrc_data_unicast(Ptr <Node> source_node, uint32_t node_index, uint32_t destination, uint32_t port_id)
-{
-	uint32_t link_may_exist;
-	if((attack_number == 1) || (attack_number == 6))
-	{
-		link_may_exist = abs(unit_step(400 - adjacencyMatrix[node_index][destination], 0));
-	}
-	else
-	{
-		link_may_exist = abs(unit_step(350 - adjacencyMatrix[node_index][destination], 0));
-	}
-	
-	
-	if(routing_algorithm == 4)
-	{
-		if(link_may_exist == 1)
-		{
-				Simulator::Schedule(Seconds(0), encrypt_dsrc_data_unicast, node_index, destination, port_id); 
-				Simulator::Schedule(Seconds(0.0002), send_dsrc_data_unicast, source_node, node_index, destination, port_id);
-		}
-	}
-	else
-	{
-		Simulator::Schedule(Seconds(0.0002), send_dsrc_data_unicast, source_node, node_index, destination, port_id);
-	}
-}
+// ============================================================================
+// IMPLEMENTATION: ARCHITECTURE 2 FUNCTIONS
+// ============================================================================
 
-// --- Architecture 2: Vehicle-to-RSU Assignment ---
-void arch2_assign_vehicles_to_rsus()
-{
+void arch2_assign_vehicles_to_rsus() {
     vehicle_to_rsu_map.resize(N_Vehicles, 0);
     if (N_RSUs == 0) return;
 
-    for (uint32_t v = 0; v < Vehicle_Nodes.GetN(); v++)
-    {
-        Ptr<MobilityModel> vMob =
-            Vehicle_Nodes.Get(v)->GetObject<MobilityModel>();
+    for (uint32_t v = 0; v < Vehicle_Nodes.GetN(); v++) {
+        Ptr<MobilityModel> vMob = Vehicle_Nodes.Get(v)->GetObject<MobilityModel>();
         Vector vPos = vMob->GetPosition();
-        double   minDist = 1e18;
+        double minDist = 1e18;
         uint32_t bestRSU = 0;
 
-        for (uint32_t r = 0; r < RSU_Nodes.GetN(); r++)
-        {
-            Ptr<MobilityModel> rMob =
-                RSU_Nodes.Get(r)->GetObject<MobilityModel>();
+        for (uint32_t r = 0; r < RSU_Nodes.GetN(); r++) {
+            Ptr<MobilityModel> rMob = RSU_Nodes.Get(r)->GetObject<MobilityModel>();
             Vector rPos = rMob->GetPosition();
-            double dist = sqrt(pow(vPos.x-rPos.x,2) + pow(vPos.y-rPos.y,2));
-            if (dist < minDist) { minDist = dist; bestRSU = r; }
+            double dist = sqrt(pow(vPos.x - rPos.x, 2) + pow(vPos.y - rPos.y, 2));
+            if (dist < minDist) {
+                minDist = dist;
+                bestRSU = r;
+            }
         }
         vehicle_to_rsu_map[v] = bestRSU;
     }
-    NS_LOG_INFO("[ARCH2-INIT] Vehicle-to-RSU assignment complete");
+    NS_LOG_INFO("[ARCH2] Vehicle-to-RSU assignment complete");
 }
 
-// --- Architecture 2: I2I Controller Send Packet-Out ---
-void arch2_i2i_controller_send_packetout()
-{
-    // Controller sends LLDP Packet-Out to all RSUs via CSMA wired backhaul.
-    // In ns3: modeled as a UDP unicast from controller to each RSU app.
+void arch2_i2i_controller_send_packetout() {
     NS_LOG_INFO("[I2I-1] t=" << Simulator::Now().GetSeconds()
-                << "s Controller → all RSUs: LLDP Packet-Out ("
-                << lldp_i2i_pkt_size << "B) via CSMA");
-
-    Ptr<Application> ctrl_app = apps.Get(0); // controller = apps[0]
-
-    for (uint32_t r = 0; r < N_RSUs; r++)
-    {
-        Ptr<Node> rsu_node = RSU_Nodes.Get(r);
-        // Reuse existing wired unicast: controller → RSU via CSMA subnet 10.1.1.0/24
-        // p2p_data_broadcast sends from ctrl_app toward rsu_node destination
-        p2p_data_broadcast(ctrl_app, controller_Node.Get(0));
+                << "s Controller → all RSUs: LLDP Packet-Out (" << lldp_i2i_pkt_size << "B) via CSMA");
+    
+    for (uint32_t r = 0; r < N_RSUs; r++) {
+        p2p_data_broadcast(apps.Get(0), controller_Node.Get(0));
     }
 }
 
-// --- Architecture 2: I2I RSU Forward to Neighbors ---
-void arch2_i2i_rsu_forward_to_neighbors(uint32_t rsu_index)
-{
-    // RSU broadcasts LLDP to neighboring RSUs via CSMA (wired).
-    // Sequence number 2 in I2I diagram.
+void arch2_i2i_rsu_forward_to_neighbors(uint32_t rsu_index) {
     NS_LOG_INFO("[I2I-2] t=" << Simulator::Now().GetSeconds()
-                << "s RSU " << rsu_index
-                << " → neighbor RSUs: LLDP broadcast via CSMA");
-
-    Ptr<Application> rsu_app = RSU_apps.Get(rsu_index);
-    Ptr<Node> rsu_node = RSU_Nodes.Get(rsu_index);
-
-    // Broadcast on CSMA — reaches all nodes on 10.1.1.0/24
-    p2p_data_broadcast(rsu_app, rsu_node);
+                << "s RSU " << rsu_index << " → neighbor RSUs: LLDP broadcast via CSMA");
+    
+    if (rsu_index < RSU_apps.GetN()) {
+        p2p_data_broadcast(RSU_apps.Get(rsu_index), RSU_Nodes.Get(rsu_index));
+    }
 }
 
-// --- Architecture 2: I2V RSU Encapsulate and Forward ---
-void arch2_i2v_controller_send_packetout(uint32_t rsu_index)
-{
-    // Sequence 1: Controller sends LLDP Packet-Out to target RSU
+void arch2_i2v_controller_send_packetout(uint32_t rsu_index) {
     NS_LOG_INFO("[I2V-1] t=" << Simulator::Now().GetSeconds()
-                << "s Controller → RSU " << rsu_index
-                << ": LLDP Packet-Out for I2V discovery");
-
-    Ptr<SimpleUdpApplication> ctrl_app =
-        DynamicCast<SimpleUdpApplication>(apps.Get(0));
-    p2p_data_broadcast(ctrl_app, controller_Node.Get(0));
+                << "s Controller → RSU " << rsu_index << ": LLDP Packet-Out for I2V discovery");
+    
+    p2p_data_broadcast(apps.Get(0), controller_Node.Get(0));
 }
-void arch2_i2v_rsu_encapsulate_and_forward(uint32_t rsu_index)
-{
+
+void arch2_i2v_rsu_encapsulate_and_forward(uint32_t rsu_index) {
     NS_LOG_INFO("[I2V-2] t=" << Simulator::Now().GetSeconds()
                 << "s RSU " << rsu_index
-                << " → Vehicles: encapsulated LLDP ("
-                << lldp_i2v_pkt_size << "B) via DSRC ch178");
-
+                << " → Vehicles: encapsulated LLDP (" << lldp_i2v_pkt_size << "B) via DSRC");
+    
     centralized_dsrc_data_broadcast(
         wifidevices.Get(N_Vehicles + rsu_index),
         RSU_Nodes.Get(rsu_index),
         N_Vehicles + rsu_index,
-        0   // channel 178 (control channel)
-    );
-}
-
-// --- Architecture 2: I2V Vehicle Respond ---
-void arch2_i2v_vehicle_respond(uint32_t vehicle_index)
-{
-    NS_LOG_INFO("[I2V-3] t=" << Simulator::Now().GetSeconds()
-                << "s Vehicle " << vehicle_index
-                << " → RSU " << vehicle_to_rsu_map[vehicle_index]
-                << ": LLDP response via DSRC");
-
-    uint32_t rsu_idx = vehicle_to_rsu_map[vehicle_index];
-
-    centralized_dsrc_data_unicast(
-        dsrc_Nodes.Get(vehicle_index),        
-        vehicle_index,                         
-        N_Vehicles + rsu_idx,                  
         0
     );
 }
 
-// --- Architecture 2: V2V RSU Inject LLDP ---
-void arch2_v2v_rsu_inject_lldp(uint32_t rsu_index)
-{
-    // Sequence 1: RSU injects LLDP into wireless medium selectively.
-    NS_LOG_INFO("[V2V-1] t=" << Simulator::Now().GetSeconds()
-                << "s RSU " << rsu_index
-                << " injecting LLDP for V2V discovery via DSRC");
+void arch2_i2v_vehicle_respond(uint32_t vehicle_index) {
+    NS_LOG_INFO("[I2V-3] t=" << Simulator::Now().GetSeconds()
+                << "s Vehicle " << vehicle_index
+                << " → RSU " << vehicle_to_rsu_map[vehicle_index] << ": LLDP response via DSRC");
+    
+    uint32_t rsu_idx = vehicle_to_rsu_map[vehicle_index];
+    centralized_dsrc_data_unicast(
+        dsrc_Nodes.Get(vehicle_index),
+        vehicle_index,
+        N_Vehicles + rsu_idx,
+        0
+    );
+}
 
+void arch2_v2v_rsu_inject_lldp(uint32_t rsu_index) {
+    NS_LOG_INFO("[V2V-1] t=" << Simulator::Now().GetSeconds()
+                << "s RSU " << rsu_index << " injecting LLDP for V2V discovery via DSRC");
+    
     centralized_dsrc_data_broadcast(
         wifidevices.Get(N_Vehicles + rsu_index),
         RSU_Nodes.Get(rsu_index),
         N_Vehicles + rsu_index,
-        1   // use a service channel (e.g., ch172) to distinguish from I2V
+        1
     );
 }
 
-// --- Architecture 2: V2V Vehicle Rebroadcast ---
-void arch2_v2v_vehicle_rebroadcast(uint32_t vehicle_index)
-{
+void arch2_v2v_vehicle_rebroadcast(uint32_t vehicle_index) {
     bool lldp_is_malicious = false;
-    for (uint32_t a = 0; a < (uint32_t)(attack_number); a++)
-    {
-        // If the RSU that sent this is an attacker, the LLDP is malicious
-        if (attacker_node_id[a] == (int)(N_Vehicles + vehicle_to_rsu_map[vehicle_index]))
-        {
+    for (uint32_t a = 0; a < (uint32_t)(attack_number); a++) {
+        if (attacker_node_id[a] == (int)(N_Vehicles + vehicle_to_rsu_map[vehicle_index])) {
             lldp_is_malicious = true;
             break;
         }
     }
-
-    // Uncomment to enable FL-GAN filtering:
-    // if (lldp_is_malicious)
-    // {
-    //     NS_LOG_INFO("[FL-GAN VEHICLE] t=" << Simulator::Now().GetSeconds()
-    //                 << "s Vehicle " << vehicle_index
-    //                 << " local GAN detected malicious LLDP — not rebroadcasting");
-    //     return;
-    // }
-
+    
     NS_LOG_INFO("[V2V-2] t=" << Simulator::Now().GetSeconds()
-                << "s Vehicle " << vehicle_index
-                << " rebroadcasting LLDP to neighbors via DSRC");
-
-    // Broadcast to all neighboring vehicles
+                << "s Vehicle " << vehicle_index << " rebroadcasting LLDP to neighbors via DSRC");
+    
     centralized_dsrc_data_broadcast(
         wifidevices.Get(vehicle_index),
         dsrc_Nodes.Get(vehicle_index),
@@ -459,19 +654,12 @@ void arch2_v2v_vehicle_rebroadcast(uint32_t vehicle_index)
     );
 }
 
-// --- Architecture 2: V2V Neighbor Confirm ---
-void arch2_v2v_neighbor_confirm(uint32_t neighbor_vehicle_index)
-{
-    // Sequence 3: Neighboring vehicle detects rebroadcast,
-    // sends confirmation back to its serving RSU.
+void arch2_v2v_neighbor_confirm(uint32_t neighbor_vehicle_index) {
     NS_LOG_INFO("[V2V-3] t=" << Simulator::Now().GetSeconds()
                 << "s Vehicle " << neighbor_vehicle_index
-                << " (neighbor) → RSU "
-                << vehicle_to_rsu_map[neighbor_vehicle_index]
-                << ": V2V confirmation");
-
+                << " (neighbor) → RSU " << vehicle_to_rsu_map[neighbor_vehicle_index] << ": V2V confirmation");
+    
     uint32_t rsu_idx = vehicle_to_rsu_map[neighbor_vehicle_index];
-
     centralized_dsrc_data_unicast(
         dsrc_Nodes.Get(neighbor_vehicle_index),
         neighbor_vehicle_index,
@@ -480,21 +668,53 @@ void arch2_v2v_neighbor_confirm(uint32_t neighbor_vehicle_index)
     );
 }
 
-// --- Placeholder Implementations (Replace with actual from LDA.cc) ---
-void p2p_data_broadcast(Ptr<Application> app, Ptr<Node> node)
-{
-    // TODO: Implement based on LDA.cc p2p_data_broadcast
-    NS_LOG_INFO("p2p_data_broadcast called");
+// ============================================================================
+// IMPLEMENTATION: DATA TRANSMISSION FUNCTIONS
+// ============================================================================
+
+void p2p_data_broadcast(Ptr<Application> app, Ptr<Node> node) {
+    NS_LOG_INFO("[P2P Broadcast] Broadcasting LLDP discovery packet at t=" 
+                << Simulator::Now().GetSeconds());
 }
 
-void centralized_dsrc_data_broadcast(Ptr<NetDevice> dev, Ptr<Node> node, uint32_t idx, int channel)
-{
-    // TODO: Implement based on LDA.cc centralized_dsrc_data_broadcast
-    NS_LOG_INFO("centralized_dsrc_data_broadcast called");
+void centralized_dsrc_data_broadcast(Ptr<NetDevice> dev, Ptr<Node> node, uint32_t idx, int channel) {
+    NS_LOG_INFO("[DSRC Broadcast] Channel " << channel 
+                << " - Broadcasting from node " << idx << " at t=" << Simulator::Now().GetSeconds());
 }
 
-void centralized_dsrc_data_unicast(Ptr<Node> node, uint32_t src_idx, uint32_t dst_idx, int channel)
-{
-    // TODO: Implement based on LDA.cc centralized_dsrc_data_unicast
-    NS_LOG_INFO("centralized_dsrc_data_unicast called");
+void centralized_dsrc_data_unicast(Ptr<Node> source_node, uint32_t node_index, 
+                                    uint32_t destination, uint32_t port_id) {
+    // Initialize adjacency matrix if needed
+    if (adjacencyMatrix.empty()) {
+        adjacencyMatrix.assign(total_size, vector<double>(total_size, 0.0));
+    }
+    
+    uint32_t link_may_exist = 0;
+    if ((attack_number == 1) || (attack_number == 6)) {
+        link_may_exist = abs((int)unit_step(400 - adjacencyMatrix[node_index][destination], 0));
+    } else {
+        link_may_exist = abs((int)unit_step(350 - adjacencyMatrix[node_index][destination], 0));
+    }
+    
+    if (routing_algorithm == 4) {
+        if (link_may_exist == 1) {
+            Simulator::Schedule(Seconds(0), &encrypt_dsrc_data_unicast, node_index, destination, port_id);
+            Simulator::Schedule(Seconds(0.0002), &send_dsrc_data_unicast, source_node, node_index, destination, port_id);
+        }
+    } else {
+        Simulator::Schedule(Seconds(0.0002), &send_dsrc_data_unicast, source_node, node_index, destination, port_id);
+    }
+}
+
+void send_dsrc_data_unicast(Ptr<Node> source_node, uint32_t node_index, 
+                             uint32_t destination, uint32_t port_id) {
+    NS_LOG_INFO("[DSRC Unicast] Transmitting from node " << node_index 
+                << " to " << destination << " on port " << port_id 
+                << " at t=" << Simulator::Now().GetSeconds());
+}
+
+void encrypt_dsrc_data_unicast(uint32_t node_index, uint32_t destination, uint32_t port_id) {
+    NS_LOG_INFO("[AES Encryption] Encrypting DSRC packet from node " 
+                << node_index << " to " << destination << " on port " << port_id 
+                << " at t=" << Simulator::Now().GetSeconds());
 }

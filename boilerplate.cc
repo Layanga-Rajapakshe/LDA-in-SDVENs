@@ -270,6 +270,7 @@ void arch2_i2v_vehicle_respond(uint32_t vehicle_index);
 void arch2_v2v_rsu_inject_lldp(uint32_t rsu_index);
 void arch2_v2v_vehicle_rebroadcast(uint32_t vehicle_index);
 void arch2_v2v_neighbor_confirm(uint32_t neighbor_vehicle_index);
+void arch2_log_discovered_links(uint32_t cycle_number);
 
 // Data Transmission Functions
 void p2p_data_broadcast(Ptr<Application> app, Ptr<Node> node);
@@ -415,18 +416,19 @@ int main(int argc, char *argv[]) {
                                              controller_malicious_assumption;
     }
 
-    // ========== Scheduling Discovery Phases ==========
+    //Scheduling Discovery Phases
     Simulator::Schedule(Seconds(1.0), &PhaseI_I2IDiscovery);
     Simulator::Schedule(Seconds(2.0), &PhaseII_I2VDiscovery);
     for (double t = 3.0; t < simTime; t += 2.0) {
         Simulator::Schedule(Seconds(t), &PhaseIII_V2VDiscovery);
     }
 
-    // ========== Architecture 2: Hybrid Discovery Loop ==========
+    // Hybrid Link Layer Discovery Protocol
     if (architecture == 2) {
         Simulator::Schedule(Seconds(1.0), &arch2_assign_vehicles_to_rsus);
 
         double t_start = 6.00;
+        uint32_t cycle_num = 0;
         for (double t = t_start; t < simTime - 1; t += data_transmission_period) {
             // PHASE I – I2I Discovery
             Simulator::Schedule(Seconds(t + arch2_i2i_offset),
@@ -464,6 +466,12 @@ int main(int argc, char *argv[]) {
                 Simulator::Schedule(Seconds(t + arch2_v2v_offset + 0.003 + 0.0001 * v),
                     &arch2_v2v_neighbor_confirm, v);
             }
+
+            // Log discovered links after all phases complete
+            Simulator::Schedule(Seconds(t + arch2_v2v_recv_offset + 0.002),
+                &arch2_log_discovered_links, cycle_num);
+            
+            cycle_num++;
         }
     }
 
@@ -650,6 +658,77 @@ void arch2_v2v_neighbor_confirm(uint32_t neighbor_vehicle_index) {
         N_Vehicles + rsu_idx,
         1
     );
+}
+
+void arch2_log_discovered_links(uint32_t cycle_number) {
+    NS_LOG_UNCOND("\n========== Discovery Cycle #" << cycle_number 
+                  << " Complete (t=" << Simulator::Now().GetSeconds() << "s) ==========");
+    
+    // Log I2I links (RSU-to-RSU)
+    uint32_t i2i_count = 0;
+    NS_LOG_UNCOND("[I2I Links] RSU-to-RSU (CSMA Backbone):");
+    for (uint32_t r1 = 0; r1 < N_RSUs; r1++) {
+        for (uint32_t r2 = r1 + 1; r2 < N_RSUs; r2++) {
+            // Simulate link detection based on grid proximity (500m spacing)
+            Ptr<MobilityModel> mob1 = RSU_Nodes.Get(r1)->GetObject<MobilityModel>();
+            Ptr<MobilityModel> mob2 = RSU_Nodes.Get(r2)->GetObject<MobilityModel>();
+            Vector pos1 = mob1->GetPosition();
+            Vector pos2 = mob2->GetPosition();
+            double dist = sqrt(pow(pos1.x - pos2.x, 2) + pow(pos1.y - pos2.y, 2));
+            
+            // RSUs within 750m are considered neighbors on wired backbone
+            if (dist <= 750.0) {
+                NS_LOG_UNCOND("  - RSU" << r1 << " ↔ RSU" << r2 
+                              << " [distance: " << std::fixed << std::setprecision(1) << dist << "m]");
+                i2i_count++;
+            }
+        }
+    }
+    if (i2i_count == 0) NS_LOG_UNCOND("  - No I2I links detected");
+    
+    // Log I2V links (RSU-to-Vehicle)
+    NS_LOG_UNCOND("\n[I2V Links] RSU-to-Vehicle (DSRC):");
+    uint32_t i2v_count = 0;
+    for (uint32_t v = 0; v < N_Vehicles; v++) {
+        if (v < vehicle_to_rsu_map.size()) {
+            uint32_t rsu_idx = vehicle_to_rsu_map[v];
+            Ptr<MobilityModel> vMob = Vehicle_Nodes.Get(v)->GetObject<MobilityModel>();
+            Ptr<MobilityModel> rMob = RSU_Nodes.Get(rsu_idx)->GetObject<MobilityModel>();
+            Vector vPos = vMob->GetPosition();
+            Vector rPos = rMob->GetPosition();
+            double dist = sqrt(pow(vPos.x - rPos.x, 2) + pow(vPos.y - rPos.y, 2));
+            
+            NS_LOG_UNCOND("  - Vehicle" << v << " ↔ RSU" << rsu_idx 
+                          << " [distance: " << std::fixed << std::setprecision(1) << dist << "m]");
+            i2v_count++;
+        }
+    }
+    if (i2v_count == 0) NS_LOG_UNCOND("  - No I2V links detected");
+    
+    // Log V2V links (Vehicle-to-Vehicle)
+    NS_LOG_UNCOND("\n[V2V Links] Vehicle-to-Vehicle (DSRC, cooperative):");
+    uint32_t v2v_count = 0;
+    for (uint32_t v1 = 0; v1 < N_Vehicles; v1++) {
+        for (uint32_t v2 = v1 + 1; v2 < N_Vehicles; v2++) {
+            Ptr<MobilityModel> mob1 = Vehicle_Nodes.Get(v1)->GetObject<MobilityModel>();
+            Ptr<MobilityModel> mob2 = Vehicle_Nodes.Get(v2)->GetObject<MobilityModel>();
+            Vector pos1 = mob1->GetPosition();
+            Vector pos2 = mob2->GetPosition();
+            double dist = sqrt(pow(pos1.x - pos2.x, 2) + pow(pos1.y - pos2.y, 2));
+            
+            // DSRC communication range ~300m
+            if (dist <= 300.0) {
+                NS_LOG_UNCOND("  - Vehicle" << v1 << " ↔ Vehicle" << v2 
+                              << " [distance: " << std::fixed << std::setprecision(1) << dist << "m]");
+                v2v_count++;
+            }
+        }
+    }
+    if (v2v_count == 0) NS_LOG_UNCOND("  - No V2V links detected");
+    
+    NS_LOG_UNCOND("\n[Summary] Total Links: I2I=" << i2i_count 
+                  << ", I2V=" << i2v_count << ", V2V=" << v2v_count);
+    NS_LOG_UNCOND("======================================================\n");
 }
 
 // ============================================================================

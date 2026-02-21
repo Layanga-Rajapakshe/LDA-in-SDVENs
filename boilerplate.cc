@@ -22,10 +22,20 @@ uint32_t N_RSUs = 2;
 std::vector<uint32_t> vehicle_to_rsu_map;
 uint32_t lldp_i2i_pkt_size = 64;
 uint32_t lldp_i2v_pkt_size = 64;
+uint32_t lldp_v2v_pkt_size   = 256;
+double data_transmission_period = 1.0/data_transmission_frequency; 
+const int total_size = 16;
 int attack_number = 0;
 int attacker_node_id[100];
 
-uint32_t empty_neighborset[max];
+uint32_t empty_neighborset[max]; 
+double arch2_i2i_offset       = 0.002;   
+double arch2_i2i_recv_offset  = 0.004;   
+double arch2_i2v_offset       = 0.006;   
+double arch2_i2v_recv_offset  = 0.008;   
+double arch2_v2v_offset       = 0.010;   
+double arch2_v2v_recv_offset  = 0.014;     
+  
 
 void initialize_empty()
 {
@@ -53,6 +63,7 @@ void PhaseIII_V2VDiscovery();
 // Architecture 2 Function Prototypes
 void arch2_assign_vehicles_to_rsus();
 void arch2_i2i_controller_send_packetout();
+void arch2_i2v_controller_send_packetout(uint32_t rsu_index);
 void arch2_i2i_rsu_forward_to_neighbors(uint32_t rsu_index);
 void arch2_i2v_rsu_encapsulate_and_forward(uint32_t rsu_index);
 void arch2_i2v_vehicle_respond(uint32_t vehicle_index);
@@ -152,6 +163,81 @@ int main(int argc, char *argv[])
     {
         Simulator::Schedule(Seconds(t), &PhaseIII_V2VDiscovery);
     }
+    if (architecture == 2)
+{
+  
+
+    Simulator::Schedule(Seconds(1.0),   arch2_assign_vehicles_to_rsus);
+
+
+    for (uint32_t i = 0; i < total_size + 2; i++)
+    {
+        uplink_last[i]   = 0.0;
+        last_downlink[i] = 0.0;
+    }
+
+    // ── Per-round loop ──────────────────────────────────────────
+    double t_start = 6.00;
+
+    for (double t = t_start; t < simTime - 1; t += data_transmission_period)
+    {
+        // ── Standard resets ──
+        // Simulator::Schedule(Seconds(t), arch2_reset_round_counters);
+        // Simulator::Schedule(Seconds(t), reset_packet_timestamps);
+        // Simulator::Schedule(Seconds(t), reset_confusion_matrix);
+        // Simulator::Schedule(Seconds(t), update_mobility);
+        // Simulator::Schedule(Seconds(t), generate_F_and_E);
+        // Simulator::Schedule(Seconds(t), set_dsrc_initial_timestamp);
+        // Simulator::Schedule(Seconds(t), set_ethernet_initial_timestamp);
+
+
+        // PHASE I – I2I Discovery
+        Simulator::Schedule(Seconds(t + arch2_i2i_offset),
+            arch2_i2i_controller_send_packetout);
+
+        for (uint32_t r = 0; r < N_RSUs; r++)
+        {
+            Simulator::Schedule(Seconds(t + arch2_i2i_offset + 0.0001*r),
+                arch2_i2i_rsu_forward_to_neighbors, r);
+
+        }
+
+        for (uint32_t r = 0; r < N_RSUs; r++)
+        {
+            Simulator::Schedule(Seconds(t + arch2_i2v_offset + 0.0001*r),
+                arch2_i2v_controller_send_packetout, r);
+
+            Simulator::Schedule(Seconds(t + arch2_i2v_offset + 0.0002*r),
+                arch2_i2v_rsu_encapsulate_and_forward, r);
+        }
+
+        for (uint32_t v = 0; v < N_Vehicles; v++)
+        {
+            Simulator::Schedule(Seconds(t + arch2_i2v_offset + 0.003 + 0.0001*v),
+                arch2_i2v_vehicle_respond, v);
+        }
+
+
+        // PHASE III – V2V Discovery
+        for (uint32_t r = 0; r < N_RSUs; r++)
+        {
+            Simulator::Schedule(Seconds(t + arch2_v2v_offset + 0.0001*r),
+                arch2_v2v_rsu_inject_lldp, r);
+        }
+
+        for (uint32_t v = 0; v < N_Vehicles; v++)
+        {
+            Simulator::Schedule(Seconds(t + arch2_v2v_offset + 0.002 + 0.0001*v),
+                arch2_v2v_vehicle_rebroadcast, v);
+
+            // Neighbors: schedule all other vehicles in same RSU zone
+            Simulator::Schedule(Seconds(t + arch2_v2v_offset + 0.003 + 0.0001*v),
+                arch2_v2v_neighbor_confirm, v);
+        }
+
+    }
+ } // end per-round loop
+
 
     Simulator::Stop(Seconds(simTime));
     Simulator::Run();
@@ -277,6 +363,17 @@ void arch2_i2i_rsu_forward_to_neighbors(uint32_t rsu_index)
 }
 
 // --- Architecture 2: I2V RSU Encapsulate and Forward ---
+void arch2_i2v_controller_send_packetout(uint32_t rsu_index)
+{
+    // Sequence 1: Controller sends LLDP Packet-Out to target RSU
+    NS_LOG_INFO("[I2V-1] t=" << Simulator::Now().GetSeconds()
+                << "s Controller → RSU " << rsu_index
+                << ": LLDP Packet-Out for I2V discovery");
+
+    Ptr<SimpleUdpApplication> ctrl_app =
+        DynamicCast<SimpleUdpApplication>(apps.Get(0));
+    p2p_data_broadcast(ctrl_app, controller_Node.Get(0));
+}
 void arch2_i2v_rsu_encapsulate_and_forward(uint32_t rsu_index)
 {
     NS_LOG_INFO("[I2V-2] t=" << Simulator::Now().GetSeconds()
